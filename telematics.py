@@ -19,7 +19,7 @@ from tqdm import tqdm
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
-BASE_URL = "http://telematics.oasa.gr/api/"
+BASE_URL = "https://telematics.oasa.gr/api/"
 
 COLUMNS = [
     "line_circle",
@@ -106,7 +106,7 @@ class AdaptiveLimiter:
         *,
         initial: int = 4,
         min_limit: int = 2,
-        max_limit: int = 64,
+        max_limit: int = 30,
         inc_every: int = 20,
         fast_latency_s: float = 0.7,
         decrease_factor: float = 0.7,
@@ -321,7 +321,7 @@ async def main(output_root: pathlib.Path = pathlib.Path("./db")):
         pbar_daily.update(1)
 
     stage2 = []
-    for entry in lines:
+    for entry in masters:
         stage2.append(fetch_and_write_daily(entry))
 
     if stage2:
