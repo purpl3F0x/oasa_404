@@ -85,7 +85,9 @@ def to_csv_fixed_rows(
 ):
     enc = "utf-8-sig" if excel_friendly else "utf-8"
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", encoding=enc, newline="") as f:
+    with open(out_path, "w+", encoding=enc, newline="") as f:
+        # f.truncate(0)
+        # f.seek(0)
         w = csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore")
         w.writeheader()
         for row in rows:
@@ -104,8 +106,8 @@ class AdaptiveLimiter:
         *,
         initial: int = 4,
         min_limit: int = 2,
-        max_limit: int = 32,
-        inc_every: int = 25,
+        max_limit: int = 64,
+        inc_every: int = 20,
         fast_latency_s: float = 0.7,
         decrease_factor: float = 0.7,
     ):
@@ -208,6 +210,10 @@ async def webGetLinesWithMLInfo(http: AsyncHTTP):
     return await http.post({"act": "webGetLinesWithMLInfo"})
 
 
+async def getDailySchedule(http: AsyncHTTP, line_code: str):
+    return await http.post({"act": "getDailySchedule", "line_code": line_code})
+
+
 async def getScheduleDaysMasterline(http: AsyncHTTP, line_code: str):
     return await http.post({"act": "getScheduleDaysMasterline", "p1": line_code})
 
@@ -221,6 +227,16 @@ async def getSchedLines(http: AsyncHTTP, ml_code: str, sdc_code: str, line_code:
 # ------------------------------
 # Orchestration
 # ------------------------------
+
+
+def current_service_folder(tz: str = "Europe/Athens") -> str:
+    now = datetime.now(ZoneInfo(tz))
+    wd = now.weekday()  # Monday=0 ... Sunday=6
+    if wd == 5:
+        return "saturday"
+    if wd == 6:
+        return "sunday"
+    return "daily"
 
 
 async def main(output_root: pathlib.Path = pathlib.Path("./db")):
@@ -263,7 +279,55 @@ async def main(output_root: pathlib.Path = pathlib.Path("./db")):
         total=total_days, desc="Timetables", unit="tables", colour="magenta"
     )
 
-    # Stage 2: for each day fetch schedules and write CSVs
+    daily_folder = current_service_folder()
+    pbar_daily = tqdm(
+        total=len(masters), desc="Daily schedules", unit="line", colour="green"
+    )
+
+    # Stage 2: Fetch daily schedules and write CSVs
+    async def fetch_and_write_daily(entry: Dict[str, Any]):
+        try:
+            sch = await getDailySchedule(http, entry["line_code"])
+        except Exception as e:
+            logger.error(
+                "getDailySchedule failed for line %s : %s",
+                entry.get("line_id"),
+                e,
+            )
+            pbar_days.update(1)
+            return
+
+        write_jobs = []
+        for k, v in sch.items():
+            if not v:
+                continue
+            try:
+                line_id = (entry.get("line_id") or "").strip()
+                filename = pathlib.Path(f"./db/{line_id}/{daily_folder}/{k}.csv")
+                write_jobs.append(
+                    asyncio.to_thread(
+                        to_csv_fixed_rows, v, filename, excel_friendly=True
+                    )
+                )
+            except Exception as e:
+                logger.error(
+                    "Prep write failed for %s / %s / %s: %s", line_id, day, k, e
+                )
+
+        if write_jobs:
+            # write concurrently off the event loop
+            await asyncio.gather(*write_jobs)
+
+        pbar_daily.update(1)
+
+    stage2 = []
+    for entry in lines:
+        stage2.append(fetch_and_write_daily(entry))
+
+    if stage2:
+        await asyncio.gather(*stage2)
+
+    # Stage 3: for each day fetch schedules and write CSVs
     async def process_line_day(entry: Dict[str, Any], day: Dict[str, Any]):
         try:
             sch = await getSchedLines(
@@ -285,7 +349,7 @@ async def main(output_root: pathlib.Path = pathlib.Path("./db")):
                 continue
             try:
                 line_id = (entry.get("line_id") or "").strip()
-                day_dir = safe_filename(day.get("sdc_descr", day.get("sdc_code")))
+                day_dir = safe_filename(day.get("sdc_descr_eng", day.get("sdc_code")))
                 filename = pathlib.Path(f"./db/{line_id}/{day_dir}/{k}.csv")
                 write_jobs.append(
                     asyncio.to_thread(
@@ -303,16 +367,17 @@ async def main(output_root: pathlib.Path = pathlib.Path("./db")):
 
         pbar_days.update(1)
 
-    stage2 = []
+    stage3 = []
     for entry, days in days_results:
         for d in days:
-            stage2.append(process_line_day(entry, d))
+            stage3.append(process_line_day(entry, d))
 
-    if stage2:
-        await asyncio.gather(*stage2)
+    if stage3:
+        await asyncio.gather(*stage3)
 
     pbar_lines.close()
     pbar_days.close()
+    pbar_daily.close()  # ### ADDED
     logger.info("Done. Output under: %s", output_root.resolve())
 
 
@@ -326,11 +391,22 @@ if __name__ == "__main__":
 
     curdir = os.path.dirname(__file__)
     repo = Repo(curdir)
-    repo.index.add(["./db"])
-    if repo.index.diff(repo.head.commit):
-        repo.index.commit("🔔" + athens_time_str)
-        logger.info(f"Files Changes:")
-        for diff_item in repo.index.diff(repo.head.commit):
-            logger.info(diff_item.a_path)
-    else:
-        logger.info("Nothing changed")
+
+    # Get lists of changed and untracked files
+    changed = [item.a_path for item in repo.index.diff(None)]
+    untracked = repo.untracked_files
+    db_changed = [
+        f for f in changed + untracked if pathlib.Path(f).is_relative_to("db")
+    ]
+
+    repo.index.add(db_changed)
+    # if db_changed:
+    #     repo.index.commit(athens_time_str)
+
+    #     logger.info(f"Files Changes:")
+    #     logger.info(db_changed)
+
+    #     origin = repo.remote(name="origin")
+    #     origin.push()
+    # else:
+    #     logger.info("Nothing changed")
