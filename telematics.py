@@ -19,7 +19,7 @@ from tqdm import tqdm
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
-BASE_URL = "https://telematics.oasa.gr/api/"
+BASE_URL = "http://telematics.oasa.gr/api/"
 
 COLUMNS = [
     "line_circle",
@@ -400,13 +400,13 @@ if __name__ == "__main__":
     ]
 
     repo.index.add(db_changed)
-    # if db_changed:
-    #     repo.index.commit(athens_time_str)
+    if db_changed:
+        repo.index.commit(athens_time_str)
 
-    #     logger.info(f"Files Changes:")
-    #     logger.info(db_changed)
+        logger.info(f"Files Changes:")
+        logger.info(db_changed)
 
-    #     origin = repo.remote(name="origin")
-    #     origin.push()
-    # else:
-    #     logger.info("Nothing changed")
+        origin = repo.remote(name="origin")
+        origin.push()
+    else:
+        logger.info("Nothing changed")
